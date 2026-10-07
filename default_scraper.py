@@ -1,258 +1,82 @@
-"""
-MegaSource
-================================
-
-Protocol
---------
-Seguindo o protocolo do MegaSource, este arquivo define:
-
-    TITLE, VERSION, DESCRIPTION
-    get_streams(media_type: str, media_id: str, config: dict | None) -> list[dict]
-
-media_type : "movie" | "series"
-media_id   : "tt0111161" (filme) | "tt0944947:1:1" (serie: temporada: episodio)
-
-Retorna streams com behaviorHints.proxyHeaders
-Usa apenas a biblioteca padrao do Python (urllib + cookiejar).
-
-Para usar: suba este arquivo como scraper.py num repositório do GitHub e
-adicione a URL raw no addon MegaSource (pagina de configuracao).
-"""
-
-import http.cookiejar
-import json
 import re
-import urllib.error
 import urllib.parse
 import urllib.request
 
-TITLE = "MegaSource Scraper"
-VERSION = "0.0.1"
-DESCRIPTION = "Filmes e Series Dublados (watchplay)"
+TITLE = "Akwam Scraper"
+VERSION = "1.1.0"
+DESCRIPTION = "Scrapes direct playable video streams from Akwam for MegaSource"
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
-)
-TMDB_API_KEY = "\x39\x32\x63\x31\x35\x30\x37\x63\x63\x31\x38\x64\x38\x35\x32\x39\x30\x65\x37\x61\x30\x62\x39\x36\x61\x62\x62\x33\x37\x33\x31\x36"
-BASE_URL = "\x68\x74\x74\x70\x73\x3a\x2f\x2f\x76\x31\x2e\x77\x61\x74\x63\x68\x70\x6c\x61\x79\x2e\x73\x68\x6f\x70"
+BASE_URL = "https://akwam.ss"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": BASE_URL
+}
 
-_cookiejar = http.cookiejar.CookieJar()
-_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_cookiejar))
-
-
-def _request(url, method="GET", data=None, headers=None):
-    request_headers = {"User-Agent": USER_AGENT}
-    if headers:
-        request_headers.update(headers)
-
-    body = None
-    if method == "POST":
-        if isinstance(data, dict):
-            body = urllib.parse.urlencode(data).encode("utf-8")
-        elif data is not None:
-            body = data
-
-    req = urllib.request.Request(url, data=body, headers=request_headers, method=method)
+def make_request(url):
     try:
-        with _opener.open(req, timeout=15) as resp:
-            return resp.status, resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", errors="replace")
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=8) as response:
+            return response.read().decode('utf-8')
     except Exception:
-        return 0, ""
-
-
-def imdb_to_tmdb(imdb_id):
-    find_url = "https://api.themoviedb.org/3/find/" + urllib.parse.quote(imdb_id)
-    query = urllib.parse.urlencode(
-        {"api_key": TMDB_API_KEY, "external_source": "imdb_id"}
-    )
-    status, body = _request(find_url + "?" + query)
-    if status != 200:
-        return None
-    try:
-        data = json.loads(body)
-    except (ValueError, TypeError):
         return None
 
-    if data.get("movie_results"):
-        item = data["movie_results"][0]
-        return {"type": "movie", "tmdb_id": item["id"], "title": item.get("title")}
-    if data.get("tv_results"):
-        item = data["tv_results"][0]
-        return {"type": "tv", "tmdb_id": item["id"], "title": item.get("name")}
+def extract_direct_video_link(download_page_url):
+    """فتح صفحة التحميل الوسيطة لاستخراج رابط الفيديو المباشر قابلا للتشغيل"""
+    html = make_request(download_page_url)
+    if not html:
+        return None
+    # البحث عن روابط الفيديو المباشرة mp4 أو سيرفر التشغيل
+    video_match = re.search(r'href="([^"]+\.(?:mp4|mkv)[^"]*)"', html, re.IGNORECASE)
+    if video_match:
+        return video_match.group(1)
+    
+    # البحث عن رابط زر "تحميل/مشاهدة" المباشر داخل الصفحة الوسيطة
+    direct_btn = re.search(r'class="[^\"]*download-link[^\"]*"[^\>]*href="([^"]+)"', html)
+    if direct_btn:
+        return direct_btn.group(1)
+        
     return None
 
+def get_streams(media_type: str, media_id: str, config: dict = None) -> list:
+    streams = []
+    
+    # تحديد كلمة البحث
+    query = config.get("query") if (config and "query" in config) else media_id
+    
+    # 1. البحث عن العنوان في أكوام
+    search_url = f"{BASE_URL}/search?q={urllib.parse.quote(query)}"
+    html = make_request(search_url)
+    if not html:
+        return streams
 
-def movie(imdb_id):
-    url = f"{BASE_URL}/movie/{urllib.parse.quote(imdb_id)}"
-    status, body = _request(url, headers={"sec-fetch-dest": "iframe"})
-    video_id = ""
-
-    if status == 200:
-        blocks = re.findall(
-            r'<div class="players_select_container">(.*?)</div>\s*</div>\s*</div>',
-            body,
-            re.S | re.I,
-        )
-        if blocks:
-            for block in blocks:
-                if "Dublado/Português" in block or "Dublado" in block:
-                    match = re.search(r'data-id="(\d+)"', block)
-                    if match:
-                        video_id = match.group(1)
-                        break
-            if not video_id:
-                for block in blocks:
-                    match = re.search(r'data-id="(\d+)"', block)
-                    if match:
-                        video_id = match.group(1)
-                        break
-
-    if video_id:
-        info = _get_player(video_id, url)
-        if info:
-            return info
-    return {}
-
-
-def series(imdb_id, season, episode):
-    tmdb_info = imdb_to_tmdb(imdb_id)
-    if not tmdb_info:
-        return {}
-
-    url = (
-        f"{BASE_URL}/tvshow/{urllib.parse.quote(str(tmdb_info['tmdb_id']))}/"
-        f"{season}/{episode}"
-    )
-    status, body = _request(url, headers={"sec-fetch-dest": "iframe"})
-    content_id = ""
-
-    if status == 200:
-        cur_season = None
-        cur_episode = None
-        m_season = re.search(r"CURRENT_SEASON\s*=\s*'(\d+)'", body)
-        m_episode = re.search(r"CURRENT_EPISODE\s*=\s*'(\d+)'", body)
-        if m_season:
-            cur_season = m_season.group(1)
-        if m_episode:
-            cur_episode = m_episode.group(1)
-
-        if cur_season and cur_episode:
-            pattern = (
-                r'data-contentid="(\d+)"[^>]*data-season="'
-                + re.escape(cur_season)
-                + r'"[^>]*data-episode="'
-                + re.escape(cur_episode)
-                + '"'
-            )
-            match = re.search(pattern, body)
-            if not match:
-                pattern_alt = (
-                    r'data-season="'
-                    + re.escape(cur_season)
-                    + r'"[^>]*data-episode="'
-                    + re.escape(cur_episode)
-                    + r'"[^>]*data-contentid="(\d+)"'
-                )
-                match = re.search(pattern_alt, body)
-            if match:
-                content_id = match.group(1)
-
-    if not content_id:
-        return {}
-
-    api_headers = {
-        "Origin": BASE_URL,
-        "Referer": url,
-        "x-requested-with": "XMLHttpRequest",
-    }
-    status_options, body_options = _request(
-        BASE_URL + "/api",
-        "POST",
-        {"action": "getOptions", "contentid": content_id},
-        headers=api_headers,
-    )
-    video_id = ""
-    if status_options == 200:
-        try:
-            data = json.loads(body_options)
-            options = data.get("data", {}).get("options", [])
-            for option in options:
-                if option.get("ID"):
-                    video_id = option["ID"]
-                    break
-        except (ValueError, TypeError):
-            pass
-
-    if video_id:
-        info = _get_player(video_id, url)
-        if info:
-            return info
-    return {}
-
-
-def _get_player(video_id, referer):
-    api_headers = {
-        "Origin": BASE_URL,
-        "Referer": referer,
-        "x-requested-with": "XMLHttpRequest",
-    }
-    status, body = _request(
-        BASE_URL + "/api",
-        "POST",
-        {"action": "getPlayer", "video_id": video_id},
-        headers=api_headers,
-    )
-    if status != 200:
-        return {}
-    try:
-        data = json.loads(body)
-        video_url = data.get("data", {}).get("video_url")
-    except (ValueError, TypeError):
-        return {}
-    if not video_url:
-        return {}
-    return {
-        "url": video_url,
-        "User-Agent": USER_AGENT,
-        "Origin": BASE_URL,
-        "Referer": BASE_URL + "/",
-    }
-
-
-def get_streams(media_type, media_id, config=None):
-    imdb_id = media_id
-    season = episode = None
-    if ":" in media_id:
-        parts = media_id.split(":", 2)
-        imdb_id, season, episode = parts[0], parts[1], parts[2]
-
-    if media_type == "movie":
-        info = movie(imdb_id)
-    elif media_type == "series" and season and episode:
-        info = series(imdb_id, int(season), int(episode))
+    # 2. استخراج رابط صفحة الفيلم/المسلسل
+    match = re.search(r'href="(https://akwam\.ss/(?:movie|series|episode)/[^"]+)"', html)
+    if not match:
+        match = re.search(r'href="((?:/movie/|/series/|/episode/)[^"]+)"', html)
+        page_url = f"{BASE_URL}{match.group(1)}" if match else None
     else:
-        info = {}
+        page_url = match.group(1)
 
-    if not info or not info.get("url"):
-        return []
+    if not page_url:
+        return streams
 
-    return [
-        {
-            "name": TITLE,
-            "title": "Dublado",
-            "url": info["url"],
-            "behaviorHints": {
-                "notMyMetadata": True,
-                "proxyHeaders": {
-                    "request": {
-                        "User-Agent": info.get("User-Agent", USER_AGENT),
-                        "Origin": info.get("Origin", BASE_URL),
-                        "Referer": info.get("Referer", BASE_URL + "/"),
-                    }
-                },
-            },
-        }
-    ]
+    # 3. جلب صفحة العرض واستخراج روابط الصفحات الوسيطة
+    page_html = make_request(page_url)
+    if not page_html:
+        return streams
+
+    download_pages = re.findall(r'href="([^"]+/download/[^"]+)"', page_html)
+    
+    # 4. جلب الرابط المباشر من أول رابطين لتفادي التبطئ (Timeout)
+    for dl_page in download_pages[:2]:
+        full_dl_page = dl_page if dl_page.startswith("http") else f"{BASE_URL}{dl_page}"
+        direct_stream = extract_direct_video_link(full_dl_page)
+        
+        if direct_stream:
+            streams.append({
+                "name": "MegaSource | Akwam",
+                "title": "🎬 أكوام - سيرفر تشغيل مباشر",
+                "url": direct_stream
+            })
+
+    return streams
